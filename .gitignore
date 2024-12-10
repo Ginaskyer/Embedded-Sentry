@@ -1,0 +1,18 @@
+# 忽略 PlatformIO 自动生成的文件
+.pio/
+.vscode/
+.idea/
+*.elf
+*.bin
+*.hex
+*.map
+
+# 忽略编译输出
+*.o
+*.obj
+*.exe
+
+# 忽略系统文件
+Thumbs.db
+.DS_Store
+C:/usr/13925/

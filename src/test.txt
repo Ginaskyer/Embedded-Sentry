@@ -1,0 +1,120 @@
+// Part 3 --> (b) --> Interrupt Implementation
+
+// Define control register addresses and their configurations
+#define CTRL_REG1 0x20                  // Address of Control Register 1
+#define CTRL_REG1_CONFIG 0b01'10'1'1'1'1 // Configuration for enabling gyroscope and setting data rate
+#define CTRL_REG4 0x23                  // Address of Control Register 4
+#define CTRL_REG4_CONFIG 0b0'0'01'0'00'0 // Configuration for setting full-scale range
+#define CTRL_REG3 0x22                  // Address of Control Register 3
+#define CTRL_REG3_CONFIG 0b0'0'0'0'1'000 // Enable data-ready interrupt
+
+// Define a flag for SPI communication completion
+#define SPI_FLAG 1                      // Event flag for SPI transfer completion
+
+// Define the Data Ready Flag
+#define DATA_READY_FLAG 2               // Event flag for data-ready interrupt
+
+// Define the address to read the X-axis lower data
+#define OUT_X_L 0x28                    // Address of the gyroscope's X-axis lower byte data register
+
+// Declare an EventFlags object for handling asynchronous events
+EventFlags flags;
+
+// Callback function to be called upon SPI transfer completion
+void spi_cb(int event)
+{
+    // Set the SPI_FLAG to signal the main thread
+    flags.set(SPI_FLAG);
+}
+
+// Interrupt callback for the data-ready signal
+void data_cb()
+{
+    // Set the DATA_READY_FLAG to signal the main thread
+    flags.set(DATA_READY_FLAG);
+}
+
+// Define a scaling factor for converting raw sensor data to actual angular velocity
+#define SCALING_FACTOR (17.5f * 0.0174532925199432957692236907684886f / 1000.0f)
+
+int main()
+{
+    // Initialize the SPI object with specific pins
+    SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel); // SPI pins: MOSI, MISO, SCK, and Slave Select
+
+    // Buffers for sending and receiving data over SPI
+    uint8_t write_buf[32], read_buf[32];
+
+    // Configure the interrupt pin for the data-ready signal
+    InterruptIn int2(PA_2, PullDown);   // Initialize INT2 pin with pull-down resistor
+    int2.rise(&data_cb);                // Attach the data-ready callback to the rising edge of INT2
+
+    // Configure SPI format and frequency
+    spi.format(8, 3);                   // 8-bit data size, SPI mode 3
+    spi.frequency(1'000'000);           // SPI clock frequency set to 1 MHz
+
+    // Configure CTRL_REG1 to enable gyroscope and set data rate
+    write_buf[0] = CTRL_REG1;           // Register address
+    write_buf[1] = CTRL_REG1_CONFIG;    // Configuration value
+
+    spi.transfer(write_buf, 2, read_buf, 2, spi_cb); // Perform SPI transfer
+    flags.wait_all(SPI_FLAG);           // Wait for SPI transfer completion
+
+    // Configure CTRL_REG4 to set full-scale range
+    write_buf[0] = CTRL_REG4;           // Register address
+    write_buf[1] = CTRL_REG4_CONFIG;    // Configuration value
+
+    spi.transfer(write_buf, 2, read_buf, 2, spi_cb); // Perform SPI transfer
+    flags.wait_all(SPI_FLAG);           // Wait for SPI transfer completion
+
+    // Configure CTRL_REG3 to enable data-ready interrupt
+    write_buf[0] = CTRL_REG3;           // Register address
+    write_buf[1] = CTRL_REG3_CONFIG;    // Configuration value
+
+    spi.transfer(write_buf, 2, read_buf, 2, spi_cb); // Perform SPI transfer
+    flags.wait_all(SPI_FLAG);           // Wait for SPI transfer completion
+
+    // Dummy value to reset the write buffer
+    write_buf[1] = 0xFF;
+
+    // Continuous reading loop
+    while (true)
+    {
+        uint16_t raw_gx, raw_gy, raw_gz; // Variables to store raw gyroscope data
+        float gx, gy, gz;                // Variables to store actual angular velocity
+
+        // Wait for the data-ready interrupt flag to be set
+        flags.wait_all(DATA_READY_FLAG);
+
+        // Prepare to read gyroscope data starting from OUT_X_L
+        write_buf[0] = OUT_X_L | 0x80 | 0x40; // Read command with auto-increment for sequential registers
+
+        // Perform SPI transfer to read 6 bytes of data (X, Y, and Z axes)
+        spi.transfer(write_buf, 7, read_buf, 7, spi_cb);
+        flags.wait_all(SPI_FLAG);       // Wait for SPI transfer completion
+
+        // Convert received data into 16-bit integers for each axis
+        raw_gx = (((uint16_t)read_buf[2]) << 8) | ((uint16_t)read_buf[1]);
+        raw_gy = (((uint16_t)read_buf[4]) << 8) | ((uint16_t)read_buf[3]);
+        raw_gz = (((uint16_t)read_buf[6]) << 8) | ((uint16_t)read_buf[5]);
+
+        // Print raw values for debugging
+        printf("RAW -> \t\tgx: %d \t gy: %d \t gz: %d \t\n", raw_gx, raw_gy, raw_gz);
+
+        // Print formatted data for visualization (e.g., for Teleplot)
+        printf(">x_axis: %d \n", raw_gx);
+        printf(">y_axis: %d \n", raw_gy);
+        printf(">z_axis: %d \n", raw_gz);
+
+        // Convert raw data to actual angular velocity using the scaling factor
+        gx = ((float)raw_gx) * SCALING_FACTOR;
+        gy = ((float)raw_gy) * SCALING_FACTOR;
+        gz = ((float)raw_gz) * SCALING_FACTOR;
+
+        // Print the actual angular velocity values
+        printf("Actual -> \t\tgx: %4.5f \t gy: %4.5f \t gz: %4.5f \t\n", gx, gy, gz);
+
+        // Sleep for 100 ms before the next iteration
+        thread_sleep_for(100);
+    }
+}
