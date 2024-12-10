@@ -20,6 +20,7 @@
 
 // Define a scaling factor for converting raw sensor data to actual angular velocity
 #define SCALING_FACTOR (17.5f * 0.0174532925199432957692236907684886f / 1000.0f)
+#define WINDOW_SIZE 10
 
 // Declare an EventFlags object for handling asynchronous events
 EventFlags flags;
@@ -99,6 +100,9 @@ int get_gesture(float* gesture_x){
     SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
     uint8_t write_buf[32], read_buf[32];
 
+    float window_gx[WINDOW_SIZE] = {0}, window_gy[WINDOW_SIZE] = {0}, window_gz[WINDOW_SIZE] = {0};
+    int window_index = 0;
+
     while(mode != END_MODE){
         
         flags.wait_all(DATA_READY_FLAG, 0xFF, true);
@@ -120,12 +124,32 @@ int get_gesture(float* gesture_x){
         // printf("x: %f \n", gx);
         // printf("y: %f \n", gy);
         // printf("z: %f \n", gz);
-        int indexx = counter;
-        int indexy = counter + 1;
-        int indexz = counter + 2;
-        gesture_x [indexx] = gx;
-        gesture_x [indexy] = gy;
-        gesture_x [indexz] = gz;
+
+        // // 2. Moving Average FIR
+        window_gx[window_index] = gx;
+        window_gy[window_index] = gy;
+        window_gz[window_index] = gz;
+        float avg_gx = 0.0f, avg_gy = 0.0f, avg_gz = 0.0f;
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            avg_gx += window_gx[i];
+            avg_gy += window_gy[i];
+            avg_gz += window_gz[i];
+        }
+        avg_gx /= WINDOW_SIZE;
+        avg_gy /= WINDOW_SIZE;
+        avg_gz /= WINDOW_SIZE;
+        window_index = (window_index + 1) % WINDOW_SIZE;
+        // printf("Moving Average -> gx: %4.5f, gy: %4.5f, gz: %4.5f\n", avg_gx, avg_gy, avg_gz);
+        // printf(">Moving Average X axis-> gx: %4.5f|g\n", avg_gx);
+        // printf(">Moving Average Y axis-> gy: %4.5f|g\n", avg_gy);
+        // printf(">Moving Average Z axis-> gz: %4.5f|g\n", avg_gz);
+
+        int indexx = counter * 3;
+        int indexy = counter * 3 + 1;
+        int indexz = counter * 3 + 2;
+        gesture_x [indexx] = avg_gx;
+        gesture_x [indexy] = avg_gy;
+        gesture_x [indexz] = avg_gz;
 
         counter += 1;
         if(counter >= 100){
@@ -200,10 +224,12 @@ int main()
 
         // printf("begin test \n");
         if(mode == TRAIN_MODE){
-            printf("Train mode begin \n");
+            printf("Train mode begin \n \n");
             int count = 0;
             count = get_gesture(gesture_x);
-            printf("test: %f \n", gesture_x[0]);
+            for(int i = 0; i < count; i++){
+                printf("%f, %f, %f \n", gesture_x[3*i], gesture_x[3*i+1], gesture_x[3*i+2]);
+            }
             printf("counter: %d \n", count);
             printf("Train mode end \n");
         }
