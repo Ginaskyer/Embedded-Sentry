@@ -4,6 +4,7 @@
 // Define a flag for SPI communication completion
 #define SPI_FLAG 1                      // Event flag for SPI transfer completion
 #define INI_FLAG 0                      // Event flag for SPI transfer completion
+#define DATA_READY_FLAG 2
 #define TRAIN_MODE 1                      //int value for train mode
 #define TEST_MODE 2                      //int value for test mode
 #define END_MODE 3                      //int value for mode end
@@ -40,6 +41,11 @@ void spi_cb(int event)
     function: Interrupt -> set the flags if data transfer is finished;
     */
     flags.set(SPI_FLAG);
+}
+
+// Callback function for Data Ready Interrupt
+void data_cb() {
+    flags.set(DATA_READY_FLAG);
 }
 
 void button_down()
@@ -85,14 +91,49 @@ void button_up(){
     }
 }
 
-int get_gesture(){
+int get_gesture(float* gesture_x){
     // button.rise(&function_end); 
     int counter = 0;
+    uint16_t raw_gx, raw_gy, raw_gz; // raw gyro values
+    float gx, gy, gz; // converted gyro values
+    SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
+    uint8_t write_buf[32], read_buf[32];
+
     while(mode != END_MODE){
-        // printf("gesture \n");
+        
+        flags.wait_all(DATA_READY_FLAG, 0xFF, true);
+        
+        // Read GYRO Data using SPI transfer --> 6 bytes!
+        write_buf[0] = OUT_X_L | 0x80 | 0x40;
+        spi.transfer(write_buf, 7, read_buf, 7, spi_cb);
+        flags.wait_all(SPI_FLAG);
+
+        // Extract raw 16-bit gyroscope data for X, Y, Z
+        raw_gx = (read_buf[2] << 8) | read_buf[1];
+        raw_gy = (read_buf[4] << 8) | read_buf[3];
+        raw_gz = (read_buf[6] << 8) | read_buf[5];
+
+        // Convert raw data to radians per second!
+        gx = raw_gx * SCALING_FACTOR;
+        gy = raw_gy * SCALING_FACTOR;
+        gz = raw_gz * SCALING_FACTOR;
+        // printf("x: %f \n", gx);
+        // printf("y: %f \n", gy);
+        // printf("z: %f \n", gz);
+        int indexx = counter;
+        int indexy = counter + 1;
+        int indexz = counter + 2;
+        gesture_x [indexx] = gx;
+        gesture_x [indexy] = gy;
+        gesture_x [indexz] = gz;
+
         counter += 1;
-        // printf("mode %d \n", mode);
-        thread_sleep_for(1);
+        if(counter >= 100){
+            mode = INI_FLAG;
+            printf("overflow warning. \n");
+            return counter;
+        }
+        thread_sleep_for(80);
     }
     mode = INI_FLAG;
     return counter;
@@ -114,6 +155,10 @@ int main()
     button.rise(&button_down); 
     button.fall(&button_up); 
 
+    // Interrupt
+    InterruptIn int2(PA_2, PullDown);
+    int2.rise(&data_cb);
+
     // Initialize the SPI object with specific pins
     SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel); // SPI pins: MOSI, MISO, SCK, and Slave Select
 
@@ -130,7 +175,6 @@ int main()
 
     spi.transfer(write_buf, 2, read_buf, 2, spi_cb); // Perform SPI transfer
     flags.wait_all(SPI_FLAG);           // Wait for SPI transfer completion
-    thread_sleep_for(1000);
 
     // Configure CTRL_REG4 to set full-scale range
     write_buf[0] = CTRL_REG4;           // Register address
@@ -138,11 +182,16 @@ int main()
 
     spi.transfer(write_buf, 2, read_buf, 2, spi_cb); // Perform SPI transfer
     flags.wait_all(SPI_FLAG);           // Wait for SPI transfer completion
-    thread_sleep_for(1000);
+
+    // 3. Control Register 3
+    write_buf[0] = CTRL_REG3;
+    write_buf[1] = CTRL_REG3_CONFIG;
+    spi.transfer(write_buf, 2, read_buf, 2, &spi_cb);
+    flags.wait_all(SPI_FLAG);
 
     // Dummy value to reset the write buffer
     write_buf[1] = 0xFF;
-
+    float gesture_x[300];
     // Continuous reading loop
     while (true)
     {
@@ -153,7 +202,8 @@ int main()
         if(mode == TRAIN_MODE){
             printf("Train mode begin \n");
             int count = 0;
-            count = get_gesture();
+            count = get_gesture(gesture_x);
+            printf("test: %f \n", gesture_x[0]);
             printf("counter: %d \n", count);
             printf("Train mode end \n");
         }
