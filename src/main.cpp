@@ -1,3 +1,7 @@
+/*
+  ECE-GY 6483 Embedded System Final Project: Embedded Sentry
+  Team member: Xian Wu, Xingyu Liu, Yimeng Zhang
+*/
 #include "mbed.h"
 #include "TS_DISCO_F429ZI.h"
 #include "LCD_DISCO_F429ZI.h"
@@ -25,7 +29,7 @@
 
 // Define a scaling factor for converting raw sensor data to actual angular velocity
 #define SCALING_FACTOR (17.5f * 0.0174532925199432957692236907684886f / 1000.0f)
-#define WINDOW_SIZE 10
+#define WINDOW_SIZE 15
 
 // Define global variable
 InterruptIn button(BUTTON1);
@@ -103,39 +107,35 @@ void button_up(){
 // Using SPI to get x, y, z of the gesture in train mode
 // Input: address of array to store gesture data
 int get_gesture(float* gesture_x){
-    // button.rise(&function_end); 
-    lcd.Clear(LCD_COLOR_LIGHTYELLOW);
-    lcd.SetBackColor(LCD_COLOR_LIGHTYELLOW);
-    lcd.SetTextColor(LCD_COLOR_WHITE);
-    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train mode", CENTER_MODE);
-
     int counter = 0;
-    uint16_t raw_gx, raw_gy, raw_gz; // raw gyro values
-    float gx, gy, gz; // converted gyro values
-    SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
-    uint8_t write_buf[32], read_buf[32];
 
+    SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
+    spi.format(8, 3);                   // 8-bit data size, SPI mode 3
+    spi.frequency(1'000'000);           // SPI clock frequency set to 1 MHz
+    uint8_t write_buf[32], read_buf[32];
+    
     float window_gx[WINDOW_SIZE] = {0}, window_gy[WINDOW_SIZE] = {0}, window_gz[WINDOW_SIZE] = {0};
     int window_index = 0;
 
     while(mode != END_MODE){
         
         flags.wait_all(DATA_READY_FLAG, 0xFF, true);
-        
+        int16_t raw_gx, raw_gy, raw_gz; // raw gyro values
+        float gx, gy, gz; // converted gyro values
         // Read GYRO Data using SPI transfer --> 6 bytes!
         write_buf[0] = OUT_X_L | 0x80 | 0x40;
         spi.transfer(write_buf, 7, read_buf, 7, spi_cb);
         flags.wait_all(SPI_FLAG);
 
         // Extract raw 16-bit gyroscope data for X, Y, Z
-        raw_gx = (read_buf[2] << 8) | read_buf[1];
-        raw_gy = (read_buf[4] << 8) | read_buf[3];
-        raw_gz = (read_buf[6] << 8) | read_buf[5];
+        raw_gx = (((uint16_t)read_buf[2]) << 8) | ((uint16_t)read_buf[1]);
+        raw_gy = (((uint16_t)read_buf[4]) << 8) | ((uint16_t)read_buf[3]);
+        raw_gz = (((uint16_t)read_buf[6]) << 8) | ((uint16_t)read_buf[5]);
 
         // Convert raw data to radians per second!
-        gx = raw_gx * SCALING_FACTOR;
-        gy = raw_gy * SCALING_FACTOR;
-        gz = raw_gz * SCALING_FACTOR;
+        gx = ((float)raw_gx) * SCALING_FACTOR;
+        gy = ((float)raw_gy) * SCALING_FACTOR;
+        gz = ((float)raw_gz) * SCALING_FACTOR;
         // printf("x: %f \n", gx);
         // printf("y: %f \n", gy);
         // printf("z: %f \n", gz);
@@ -167,12 +167,19 @@ int get_gesture(float* gesture_x){
         gesture_x [indexz] = avg_gz;
 
         counter += 1;
-        if(counter >= 100){
-            mode = INI_FLAG;
-            printf("overflow warning.");
-            return counter;
+        if(counter >= 70){
+            if (mode == TRAIN_MODE){
+                mode = INI_FLAG;
+                printf("overflow warning.\n");
+                return counter;
+            }
+            else{
+                mode = INI_FLAG;
+                printf("Time out.\n");
+                return counter;
+            }
         }
-        thread_sleep_for(80);
+        thread_sleep_for(70);
     }
     mode = INI_FLAG;
     lcd.Clear(LCD_COLOR_BLUE);
@@ -181,10 +188,184 @@ int get_gesture(float* gesture_x){
     return counter;
 }
 
+// Calculate Euclidean distance
+// gesture1: saved gesture
+// gesture2: current gesture
+// index1: the current calculating index of saved gesture
+// index2: the current calculating index of test gesture
+float calculate_point_distance(float* gesture1, float* gesture2, int index1, int index2) {
+    float x1 = gesture1[index1 * 3];
+    float y1 = gesture1[index1 * 3 + 1];
+    float z1 = gesture1[index1 * 3 + 2];
+    float x2 = gesture2[index2 * 3];
+    float y2 = gesture2[index2 * 3 + 1];
+    float z2 = gesture2[index2 * 3 + 2];
+    return sqrt(pow(x1 - x2, 2) + pow(y1 - y2, 2) + pow(z1 - z2, 2));
+}
+
+// Create dtw martix and calculate the smallest distance between two gestures
+// gesture1: saved gesture
+// gesture2: current gesture
+// len1: length of saved gesture
+// len2: length of test gesture
+float calculate_dtw(float* gesture1, float* gesture2, int len1, int len2) {
+    int points1 = len1; 
+    int points2 = len2;
+
+    float** dtw = new float*[points1 + 1];
+    for (int i = 0; i <= points1; ++i) {
+        dtw[i] = new float[points2 + 1];
+        for (int j = 0; j <= points2; ++j) {
+            dtw[i][j] = INFINITY;
+        }
+    }
+    dtw[0][0] = 0.0f;
+
+    for (int i = 1; i <= points1; ++i) {
+        for (int j = 1; j <= points2; ++j) {
+            float cost = calculate_point_distance(gesture1, gesture2, i - 1, j - 1);
+            dtw[i][j] = cost + fmin(dtw[i - 1][j], fmin(dtw[i][j - 1], dtw[i - 1][j - 1]));
+        }
+    }
+
+    float result = dtw[points1][points2];
+    for (int i = 0; i <= points1; ++i) {
+        delete[] dtw[i];
+    }
+    delete[] dtw;
+    return result;
+}
+
+// Normalize gesture to same length within range of [0, 1]
+// gesture: gesture which awaiting normalize
+// length: length of gesture array
+void normalize_gesture(float* gesture, int length) {
+    float min_x = INFINITY, max_x = -INFINITY;
+    float min_y = INFINITY, max_y = -INFINITY;
+    float min_z = INFINITY, max_z = -INFINITY;
+
+    for (int i = 0; i < length; ++i) {
+        float x = gesture[i * 3];
+        float y = gesture[i * 3 + 1];
+        float z = gesture[i * 3 + 2];
+        if (x < min_x) min_x = x;
+        if (x > max_x) max_x = x;
+        if (y < min_y) min_y = y;
+        if (y > max_y) max_y = y;
+        if (z < min_z) min_z = z;
+        if (z > max_z) max_z = z;
+    }
+
+    float x_range = max_x - min_x;
+    float y_range = max_y - min_y;
+    float z_range = max_z - min_z;
+    if (x_range == 0) x_range = 1;
+    if (y_range == 0) y_range = 1;
+    if (z_range == 0) z_range = 1;
+
+    for (int i = 0; i < length; ++i) {
+        gesture[i * 3]     = (gesture[i * 3] - min_x) / x_range;
+        gesture[i * 3 + 1] = (gesture[i * 3 + 1] - min_y) / y_range;
+        gesture[i * 3 + 2] = (gesture[i * 3 + 2] - min_z) / z_range;
+    }
+}
+
+// Upsample both gesture to the same length
+// gesture: gesture to upsample
+// original_length: gesture's origin length
+// target_length: gesture's length after upsample
+int upsample_gesture(float* gesture, int original_length, int target_length) {
+    float* temp = new float[target_length * 3];
+    // treat the original samples as if they go from 0 to len-1.
+    for (int i = 0; i < target_length; i++) {
+        float t = (float)i * (original_length - 1) / (float)(target_length - 1);
+        int idx0 = (int)floor(t);
+        int idx1 = (int)ceil(t);
+        if (idx1 > original_length - 1) {
+            idx1 = original_length - 1;
+        }
+        // alpha is length between idx0 and idx1
+        float alpha = t - (float)idx0;
+        float x0 = gesture[idx0 * 3 + 0];
+        float y0 = gesture[idx0 * 3 + 1];
+        float z0 = gesture[idx0 * 3 + 2];
+        float x1 = gesture[idx1 * 3 + 0];
+        float y1 = gesture[idx1 * 3 + 1];
+        float z1 = gesture[idx1 * 3 + 2];
+
+        temp[i * 3 + 0] = x0 + alpha * (x1 - x0);
+        temp[i * 3 + 1] = y0 + alpha * (y1 - y0);
+        temp[i * 3 + 2] = z0 + alpha * (z1 - z0);
+    }
+    // Copy the upsampled data back into gesture and release
+    for (int i = 0; i < target_length * 3; i++) {
+        gesture[i] = temp[i];
+    }
+    delete[] temp;
+    return target_length;
+}
+
+// Compare two gesture's similarity via normalize, Euclidean distance and dtw
+// saved_gesture: saved_gesture
+// test_gesture: test_gesture
+// len1: length of saved gesture
+// len2: length of test gesture
+bool compare(float* saved_gesture, float* test_gesture, int len1, int len2) {
+    // Copy saved gesture into local variable and edit on the copied version so origin gesture won't accidentally get changed
+    float saved_copy[210];
+    memcpy(saved_copy, saved_gesture, len1 * 3 * sizeof(float));
+    int new_len1 = len1;
+    
+    if(len2 > new_len1){
+        new_len1 = upsample_gesture(saved_copy, new_len1, len2);
+    }
+    else if(len2 < new_len1){
+        len2 = upsample_gesture(test_gesture, len2, new_len1);
+    }
+    
+    //Normalize both gestures
+    normalize_gesture(saved_copy, new_len1);
+    normalize_gesture(test_gesture, len2);
+
+    //Debug use, show datas in both gesture array
+    /*for (int i = 0; i < len; ++i) {
+        printf("Saved: (%f, %f, %f)\n", saved_gesture[i*3], saved_gesture[i*3+1], saved_gesture[i*3+2]);
+        printf("Test: (%f, %f, %f)\n", test_gesture[i*3], test_gesture[i*3+1], test_gesture[i*3+2]);
+    }*/
+
+    float dtw_distance = calculate_dtw(saved_copy, test_gesture, new_len1, len2);
+    float threshold = 16.0f; //Change to make the comparison more restrictive or less restrictive
+    printf("%f\n", dtw_distance);
+    return dtw_distance < threshold;
+}
+
+// test mode, change LCD and call compare
+// gesture: saved gesture in train mode
+// count: length of saved gesture
+bool pattern_map(float* gesture, int count){
+    int current_count = 0;
+    float current_gesture[210] = {0};
+
+    current_count = get_gesture(current_gesture);
+
+    lcd.Clear(LCD_COLOR_LIGHTGRAY);
+    lcd.SetBackColor(LCD_COLOR_LIGHTGRAY);
+    lcd.SetTextColor(LCD_COLOR_DARKGRAY);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Recognizing...", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Please wait", CENTER_MODE);
+    if(compare(gesture, current_gesture, count, current_count)){
+        mode = INI_FLAG;
+        return true;
+    }
+    else{
+        mode = INI_FLAG;
+        return false;
+    }
+}
+
 // Display the result with lcd
 // Input: the result of the mapping
 void lcd_control(bool result){
-
     uint8_t status;
   
     BSP_LCD_SetFont(&Font20);
@@ -216,113 +397,64 @@ void lcd_control(bool result){
     return;
 }
 
-float calculate_angle(float x, float y, float z) {
-    return atan2(sqrt(y * y + z * z), x); // 与X轴角度
+// Switching LCD to train mode
+void train_mode_light_switch(){
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 3s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
+
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 2s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
+
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 1s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
+
+    // button.rise(&function_end); 
+    lcd.Clear(LCD_COLOR_LIGHTYELLOW);
+    lcd.SetBackColor(LCD_COLOR_LIGHTYELLOW);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train mode", CENTER_MODE);
 }
 
-void preprocess_gesture(float* gesture, int count) {
-    for (int i = 0; i < count; i++) {
-        float x = gesture[i * 3];
-        float y = gesture[i * 3 + 1];
-        float z = gesture[i * 3 + 2];
-        gesture[i] = calculate_angle(x, y, z); // 角动量
-    }
-}
+// Switching LCD to test mode
+void test_mode_light_switch(){
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Test mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 3s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
 
-#include <cmath>
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Test mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 2s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
 
-bool pattern_map(float* gesture, int count){
+    lcd.Clear(LCD_COLOR_BLACK);
+    lcd.SetBackColor(LCD_COLOR_BLACK);
+    lcd.SetTextColor(LCD_COLOR_WHITE);
+    lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Test mode", CENTER_MODE);
+    lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Ready: 1s", CENTER_MODE);
+    ThisThread::sleep_for(1s);
+
     lcd.Clear(LCD_COLOR_LIGHTCYAN);
     lcd.SetBackColor(LCD_COLOR_LIGHTCYAN);
     lcd.SetTextColor(LCD_COLOR_WHITE);
     lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Test mode", CENTER_MODE);
-
-    mode = INI_FLAG;
-    lcd.Clear(LCD_COLOR_BLUE);
-    lcd.SetBackColor(LCD_COLOR_BLUE);
-    lcd.SetTextColor(LCD_COLOR_WHITE);
-    return false;
 }
-
-// bool pattern_map(float* gesture, int count) {
-//     uint16_t raw_gx, raw_gy, raw_gz;
-//     float gx, gy, gz;
-//     SPI spi(PF_9, PF_8, PF_7, PC_1, use_gpio_ssel);
-//     uint8_t write_buf[32], read_buf[32];
-
-//     float window_gx[WINDOW_SIZE] = {0}, window_gy[WINDOW_SIZE] = {0}, window_gz[WINDOW_SIZE] = {0};
-//     int window_index = 0;
-
-//     float current_gesture[300] = {0};
-//     int current_count = 0;
-//     float threshold = 0.1f;
-
-//     preprocess_gesture(gesture, count);
-
-//     while (mode != END_MODE) {
-//         flags.wait_all(DATA_READY_FLAG, 0xFF, true);
-//         write_buf[0] = OUT_X_L | 0x80 | 0x40;
-//         spi.transfer(write_buf, 7, read_buf, 7, spi_cb);
-//         flags.wait_all(SPI_FLAG);
-
-//         raw_gx = (read_buf[2] << 8) | read_buf[1];
-//         raw_gy = (read_buf[4] << 8) | read_buf[3];
-//         raw_gz = (read_buf[6] << 8) | read_buf[5];
-
-//         gx = raw_gx * SCALING_FACTOR;
-//         gy = raw_gy * SCALING_FACTOR;
-//         gz = raw_gz * SCALING_FACTOR;
-
-//         window_gx[window_index] = gx;
-//         window_gy[window_index] = gy;
-//         window_gz[window_index] = gz;
-//         float avg_gx = 0.0f, avg_gy = 0.0f, avg_gz = 0.0f;
-//         for (int i = 0; i < WINDOW_SIZE; i++) {
-//             avg_gx += window_gx[i];
-//             avg_gy += window_gy[i];
-//             avg_gz += window_gz[i];
-//         }
-//         avg_gx /= WINDOW_SIZE;
-//         avg_gy /= WINDOW_SIZE;
-//         avg_gz /= WINDOW_SIZE;
-//         window_index = (window_index + 1) % WINDOW_SIZE;
-
-//         float angle = calculate_angle(avg_gx, avg_gy, avg_gz);
-//         current_gesture[current_count] = angle;
-//         current_count++;
-
-//         if (current_count >= count) {
-//             float similarity = 0.0f;
-//             for (int i = 0; i < count; i++) {
-//                 similarity += fabs(gesture[i] - current_gesture[i+(current_count-count)]);
-//             }
-//             similarity /= count;
-
-//             int d1 = similarity;
-//             float f2 = similarity - d1;
-//             int d2 = trunc(f2 * 10000);
-//             char buffer[50];
-//             sprintf(buffer, "%d.%04d\n", d1, d2);
-//             printf("%s", buffer);
-
-//             if (similarity < threshold) {
-//                 mode = INI_FLAG;
-//                 printf("Gesture Matched!\n");
-//                 return true;
-//             }
-//             printf("New round of comparison\n");
-//         }
-
-//         if (current_count >= 298) {
-//             printf("Out of time!\n");
-//             mode = INI_FLAG;
-//             return false;
-//         }
-//         thread_sleep_for(80);
-//     }
-
-//     return false;
-// }
 
 int main()
 {   
@@ -344,7 +476,7 @@ int main()
 
     // Configure SPI format and frequency
     spi.format(8, 3);                   // 8-bit data size, SPI mode 3
-    spi.frequency(1'000);           // SPI clock frequency set to 1 MHz
+    spi.frequency(1'000'000);           // SPI clock frequency set to 1 MHz
 
     // Configure CTRL_REG1 to enable gyroscope and set data rate
     write_buf[0] = CTRL_REG1;           // Register address
@@ -363,11 +495,11 @@ int main()
     // 3. Control Register 3
     write_buf[0] = CTRL_REG3;
     write_buf[1] = CTRL_REG3_CONFIG;
-    spi.transfer(write_buf, 2, read_buf, 2, &spi_cb);
+    spi.transfer(write_buf, 2, read_buf, 2, spi_cb);
     flags.wait_all(SPI_FLAG);
 
     write_buf[1] = 0xFF;
-    float gesture_x[300];
+    float gesture_x[210];
     int count = 0;
 
     BSP_LCD_SetFont(&Font20);
@@ -406,9 +538,16 @@ int main()
     // Continuous reading loop
     while (true)
     {
+        lcd.Clear(LCD_COLOR_BLUE);
+        lcd.SetBackColor(LCD_COLOR_BLUE);
+        lcd.SetTextColor(LCD_COLOR_WHITE);
+        lcd.DisplayStringAt(0, LINE(5), (uint8_t *)"Train: short", CENTER_MODE);
+        lcd.DisplayStringAt(0, LINE(6), (uint8_t *)"Test: long", CENTER_MODE);
+        ThisThread::sleep_for(1s);
         // Enter train mode
         if(mode == TRAIN_MODE){
             printf("Train mode begin \n \n");
+            train_mode_light_switch();
             count = get_gesture(gesture_x);
             mode = INI_FLAG;
             for(int i = 0; i < count; i++){
@@ -422,13 +561,13 @@ int main()
         if(mode == TEST_MODE){
             printf("Test mode begin \n");
             bool result;
+            test_mode_light_switch();
             result = pattern_map(gesture_x, count);
             mode = INI_FLAG;
             lcd_control(result);
             lcd.Clear(LCD_COLOR_BLUE);
             lcd.SetBackColor(LCD_COLOR_BLUE);
             lcd.SetTextColor(LCD_COLOR_WHITE);
-
             printf("Test mode end \n");
         }
 
